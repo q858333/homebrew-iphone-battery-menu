@@ -1,0 +1,249 @@
+import AppKit
+import Foundation
+
+struct Device: Equatable {
+    let udid: String
+    let name: String
+}
+
+struct BatteryStatus {
+    let level: Int
+    let isCharging: Bool?
+}
+
+final class CommandRunner {
+    let ideviceIDPath = "/opt/homebrew/bin/idevice_id"
+    let ideviceInfoPath = "/opt/homebrew/bin/ideviceinfo"
+    let batteryDomain = "com.apple.mobile.battery"
+
+    func run(_ executable: String, _ arguments: [String]) throws -> String {
+        let process = Process()
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let error = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+        guard process.terminationStatus == 0 else {
+            throw NSError(
+                domain: "iPhoneBatteryMenu.Command",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: error.isEmpty ? output : error]
+            )
+        }
+
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func listDevices() throws -> [Device] {
+        let output = try run(ideviceIDPath, ["-l"])
+        let udids = output
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        return udids.map { udid in
+            let name = deviceName(udid: udid)
+            return Device(udid: udid, name: name)
+        }
+    }
+
+    func batteryStatus(udid: String) throws -> BatteryStatus {
+        let levelText = try deviceValue(udid: udid, key: "BatteryCurrentCapacity")
+        let chargingText = try? deviceValue(udid: udid, key: "BatteryIsCharging")
+        let level = Int(levelText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
+        let isCharging = chargingText.map { $0 == "true" || $0 == "1" }
+        return BatteryStatus(level: level, isCharging: isCharging)
+    }
+
+    private func deviceValue(udid: String, key: String) throws -> String {
+        try run(ideviceInfoPath, ["-u", udid, "-q", batteryDomain, "-k", key])
+    }
+
+    func deviceName(udid: String) -> String {
+        (try? run(ideviceInfoPath, ["-u", udid, "-k", "DeviceName"])) ?? udid
+    }
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let runner = CommandRunner()
+    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private var menu = NSMenu()
+    private var devices: [Device] = []
+    private var selectedDevice: Device?
+    private var timer: Timer?
+    private var lastNotificationLevel: Int?
+    private var notifyAtLevel: Int {
+        get {
+            let saved = UserDefaults.standard.integer(forKey: "notifyAtLevel")
+            return saved == 0 ? 78 : saved
+        }
+        set {
+            UserDefaults.standard.set(min(max(newValue, 1), 100), forKey: "notifyAtLevel")
+            lastNotificationLevel = nil
+        }
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+        statusItem.button?.title = "iPhone --%"
+        rebuildMenu(message: "Scanning...")
+        refreshDevices()
+        refreshBattery()
+
+        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshBattery()
+            }
+        }
+    }
+
+    private func refreshDevices() {
+        do {
+            devices = try runner.listDevices()
+            if selectedDevice == nil || !devices.contains(where: { $0.udid == selectedDevice?.udid }) {
+                selectedDevice = devices.first
+            }
+            rebuildMenu()
+        } catch {
+            statusItem.button?.title = "iPhone ?"
+            rebuildMenu(message: "Device scan failed: \(clean(error.localizedDescription))")
+        }
+    }
+
+    @objc private func refreshBattery() {
+        if selectedDevice == nil {
+            refreshDevices()
+        }
+
+        guard let device = selectedDevice else {
+            statusItem.button?.title = "No iPhone"
+            rebuildMenu(message: "No device found")
+            return
+        }
+
+        do {
+            let status = try runner.batteryStatus(udid: device.udid)
+            let chargingMark = status.isCharging == true ? " ⚡" : ""
+            statusItem.button?.title = "\(status.level)%\(chargingMark)"
+            rebuildMenu(message: "\(device.name): \(status.level)%\(chargingMark) · Alert: \(notifyAtLevel)%")
+
+            if status.level >= notifyAtLevel && lastNotificationLevel != status.level {
+                lastNotificationLevel = status.level
+                notify(title: "iPhone battery", body: "\(device.name) is at \(status.level)%")
+            }
+        } catch {
+            statusItem.button?.title = "Read failed"
+            rebuildMenu(message: clean(error.localizedDescription))
+        }
+    }
+
+    private func rebuildMenu(message: String? = nil) {
+        menu = NSMenu()
+
+        if let message {
+            let item = NSMenuItem(title: message, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+            menu.addItem(.separator())
+        }
+
+        if devices.isEmpty {
+            let item = NSMenuItem(title: "No devices", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        } else {
+            for device in devices {
+                let item = NSMenuItem(title: "\(device.name) (\(device.udid))", action: #selector(selectDevice(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = device.udid
+                item.state = device.udid == selectedDevice?.udid ? .on : .off
+                menu.addItem(item)
+            }
+        }
+
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Alert Level: \(notifyAtLevel)%", action: nil, keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Set Alert Level...", action: #selector(setAlertLevel), keyEquivalent: "l"))
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Refresh Battery", action: #selector(refreshBattery), keyEquivalent: "r"))
+        menu.addItem(NSMenuItem(title: "Refresh Devices", action: #selector(refreshDevicesAction), keyEquivalent: "d"))
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
+
+        statusItem.menu = menu
+    }
+
+    @objc private func selectDevice(_ sender: NSMenuItem) {
+        guard let udid = sender.representedObject as? String else { return }
+        selectedDevice = devices.first { $0.udid == udid }
+        lastNotificationLevel = nil
+        refreshBattery()
+    }
+
+    @objc private func refreshDevicesAction() {
+        refreshDevices()
+        refreshBattery()
+    }
+
+    @objc private func setAlertLevel() {
+        let alert = NSAlert()
+        alert.messageText = "Set battery alert level"
+        alert.informativeText = "Enter a percentage from 1 to 100."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 160, height: 24))
+        input.stringValue = String(notifyAtLevel)
+        alert.accessoryView = input
+
+        if alert.runModal() == .alertFirstButtonReturn,
+           let value = Int(input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)),
+           (1...100).contains(value) {
+            notifyAtLevel = value
+            refreshBattery()
+        }
+    }
+
+    @objc private func quit() {
+        NSApp.terminate(nil)
+    }
+
+    private func notify(title: String, body: String) {
+        let script = "display notification \(quotedAppleScript(body)) with title \(quotedAppleScript(title))"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        try? process.run()
+    }
+
+    private func quotedAppleScript(_ value: String) -> String {
+        "\"\(value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\""
+    }
+
+    private func clean(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+@main
+struct iPhoneBatteryMenuApp {
+    @MainActor
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.run()
+    }
+}
