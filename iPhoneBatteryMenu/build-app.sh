@@ -4,8 +4,18 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 mkdir -p .build/release
-ARCH="$(uname -m)"
-swiftc -parse-as-library Sources/iPhoneBatteryMenu/main.swift -target "$ARCH-apple-macos13.0" -module-cache-path .build/module-cache -o .build/release/iPhoneBatteryMenu -framework AppKit
+for ARCH in arm64 x86_64; do
+    swiftc -parse-as-library Sources/iPhoneBatteryMenu/main.swift \
+        -target "$ARCH-apple-macos13.0" \
+        -module-cache-path ".build/module-cache/$ARCH" \
+        -o ".build/release/iPhoneBatteryMenu-$ARCH" \
+        -framework AppKit
+done
+
+lipo -create \
+    .build/release/iPhoneBatteryMenu-arm64 \
+    .build/release/iPhoneBatteryMenu-x86_64 \
+    -output .build/release/iPhoneBatteryMenu
 
 APP_DIR=".build/release/iPhoneBatteryMenu.app"
 MACOS_DIR="$APP_DIR/Contents/MacOS"
