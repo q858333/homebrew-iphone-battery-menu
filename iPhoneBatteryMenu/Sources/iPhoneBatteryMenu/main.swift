@@ -11,10 +11,128 @@ struct BatteryStatus {
     let isCharging: Bool?
 }
 
-final class CommandRunner {
-    let ideviceIDPath = "/opt/homebrew/bin/idevice_id"
-    let ideviceInfoPath = "/opt/homebrew/bin/ideviceinfo"
+final class CommandOutputBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var output = ""
+    private var error = ""
+
+    func append(_ text: String, isError: Bool) {
+        lock.lock()
+        if isError {
+            error += text
+        } else {
+            output += text
+        }
+        lock.unlock()
+    }
+
+    var failureMessage: String {
+        lock.lock()
+        let message = error.isEmpty ? output : error
+        lock.unlock()
+        return message
+    }
+}
+
+final class CommandRunner: @unchecked Sendable {
     let batteryDomain = "com.apple.mobile.battery"
+
+    var hasDependencies: Bool {
+        Self.findExecutable("idevice_id") != nil && Self.findExecutable("ideviceinfo") != nil
+    }
+
+    private static func findExecutable(_ name: String) -> String? {
+        let paths = [
+            "/opt/homebrew/bin/\(name)",
+            "/usr/local/bin/\(name)"
+        ]
+
+        return paths.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    private static func requiredExecutable(_ name: String) throws -> String {
+        if let path = findExecutable(name) {
+            return path
+        }
+
+        throw NSError(
+            domain: "iPhoneBatteryMenu.Dependency",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "\(name) is not installed. Install Homebrew libimobiledevice."]
+        )
+    }
+
+    func installDependencies(progress: @escaping @Sendable (String) -> Void) throws {
+        guard !hasDependencies else { return }
+
+        guard let brewPath = Self.findExecutable("brew") else {
+            throw NSError(
+                domain: "iPhoneBatteryMenu.Dependency",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Homebrew is not installed. Install Homebrew first, then relaunch this app."]
+            )
+        }
+
+        progress("Running brew install libimobiledevice...")
+        try runWithProgress(brewPath, ["install", "libimobiledevice"], progress: progress)
+
+        guard hasDependencies else {
+            throw NSError(
+                domain: "iPhoneBatteryMenu.Dependency",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "libimobiledevice installed, but idevice_id or ideviceinfo was not found."]
+            )
+        }
+    }
+
+    private func runWithProgress(_ executable: String, _ arguments: [String], progress: @escaping @Sendable (String) -> Void) throws {
+        let process = Process()
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        let outputBuffer = CommandOutputBuffer()
+
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        let capture: @Sendable (Data, Bool) -> Void = { data, isError in
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            let lines = text
+                .split(whereSeparator: \.isNewline)
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+            outputBuffer.append(text, isError: isError)
+
+            if let line = lines.last {
+                progress(line)
+            }
+        }
+
+        outputPipe.fileHandleForReading.readabilityHandler = { handle in
+            capture(handle.availableData, false)
+        }
+        errorPipe.fileHandleForReading.readabilityHandler = { handle in
+            capture(handle.availableData, true)
+        }
+
+        try process.run()
+        process.waitUntilExit()
+
+        outputPipe.fileHandleForReading.readabilityHandler = nil
+        errorPipe.fileHandleForReading.readabilityHandler = nil
+        capture(outputPipe.fileHandleForReading.readDataToEndOfFile(), false)
+        capture(errorPipe.fileHandleForReading.readDataToEndOfFile(), true)
+
+        guard process.terminationStatus == 0 else {
+            throw NSError(
+                domain: "iPhoneBatteryMenu.Command",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: outputBuffer.failureMessage]
+            )
+        }
+    }
 
     func run(_ executable: String, _ arguments: [String]) throws -> String {
         let process = Process()
@@ -44,7 +162,7 @@ final class CommandRunner {
     }
 
     func listDevices() throws -> [Device] {
-        let output = try run(ideviceIDPath, ["-l"])
+        let output = try run(Self.requiredExecutable("idevice_id"), ["-l"])
         let udids = output
             .split(whereSeparator: \.isNewline)
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -65,11 +183,11 @@ final class CommandRunner {
     }
 
     private func deviceValue(udid: String, key: String) throws -> String {
-        try run(ideviceInfoPath, ["-u", udid, "-q", batteryDomain, "-k", key])
+        try run(Self.requiredExecutable("ideviceinfo"), ["-u", udid, "-q", batteryDomain, "-k", key])
     }
 
     func deviceName(udid: String) -> String {
-        (try? run(ideviceInfoPath, ["-u", udid, "-k", "DeviceName"])) ?? udid
+        (try? run(Self.requiredExecutable("ideviceinfo"), ["-u", udid, "-k", "DeviceName"])) ?? udid
     }
 }
 
@@ -97,12 +215,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         statusItem.button?.title = "iPhone --%"
         rebuildMenu(message: "Scanning...")
-        refreshDevices()
-        refreshBattery()
+        refreshAfterDependencyCheck()
 
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refreshBattery()
+            }
+        }
+    }
+
+    private func refreshAfterDependencyCheck() {
+        guard runner.hasDependencies else {
+            installDependencies()
+            return
+        }
+
+        refreshDevices()
+        refreshBattery()
+    }
+
+    private func installDependencies() {
+        statusItem.button?.title = "Installing"
+        rebuildMenu(message: "Installing libimobiledevice...")
+
+        let runner = self.runner
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result {
+                try runner.installDependencies { message in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.statusItem.button?.title = "Installing..."
+                        self.rebuildMenu(message: self.clean("Installing: \(message)"))
+                    }
+                }
+            }
+
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+
+                switch result {
+                case .success:
+                    self.statusItem.button?.title = "iPhone --%"
+                    self.refreshDevices()
+                    self.refreshBattery()
+                case .failure(let error):
+                    self.statusItem.button?.title = "Setup failed"
+                    self.rebuildMenu(message: self.clean(error.localizedDescription))
+                }
             }
         }
     }
