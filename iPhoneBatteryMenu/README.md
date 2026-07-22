@@ -2,6 +2,23 @@
 
 A tiny macOS menu bar utility that reads an iPhone battery level by calling Homebrew's `libimobiledevice` tools.
 
+## Install
+
+Install with one command:
+
+```bash
+brew install --cask q858333/iphone-battery-menu/iphone-battery-menu
+```
+
+Or tap the repository first, then install with the short cask name:
+
+```bash
+brew tap q858333/iphone-battery-menu
+brew install --cask iphone-battery-menu
+```
+
+Homebrew installs the required `libimobiledevice` formula with the app.
+
 ## Requirements
 
 - `/opt/homebrew/bin/idevice_id`
