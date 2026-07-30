@@ -10,6 +10,7 @@ cask "iphone-battery-menu" do
 
   depends_on macos: :ventura
   depends_on formula: "libimobiledevice"
+  depends_on formula: "android-platform-tools"
 
   app "iPhoneBatteryMenu.app"
 

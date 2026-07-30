@@ -13,7 +13,7 @@ brew tap q858333/iphone-battery-menu
 brew install --cask iphone-battery-menu
 ```
 
-安装时会通过 Homebrew 一起安装 `libimobiledevice`。
+安装时会通过 Homebrew 一起安装 `libimobiledevice` 和 `android-platform-tools`。
 
 # 运行
 ./run.sh

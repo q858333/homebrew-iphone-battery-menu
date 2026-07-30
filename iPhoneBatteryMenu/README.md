@@ -1,6 +1,6 @@
 # iPhoneBatteryMenu
 
-A tiny macOS menu bar utility that reads an iPhone battery level by calling Homebrew's `libimobiledevice` tools.
+A tiny macOS menu bar utility that reads iPhone and Android battery levels from the menu bar.
 
 ## Install
 
@@ -17,13 +17,13 @@ brew tap q858333/iphone-battery-menu
 brew install --cask iphone-battery-menu
 ```
 
-Homebrew installs the required `libimobiledevice` formula with the app.
+Homebrew installs the required `libimobiledevice` and `android-platform-tools` formulae with the app.
 
 ## Requirements
 
-- `/opt/homebrew/bin/idevice_id`
-- `/opt/homebrew/bin/ideviceinfo`
-- A trusted iPhone connection
+- `/opt/homebrew/bin/idevice_id` and `/opt/homebrew/bin/ideviceinfo` for iPhone monitoring
+- `/opt/homebrew/bin/adb` for Android monitoring
+- A trusted iPhone connection, or an Android device with USB debugging enabled
 
 ## Run
 
@@ -42,4 +42,4 @@ Use **Set Alert Level...** from the menu bar item to enter a percentage from 1 t
 open .build/release/iPhoneBatteryMenu.app
 ```
 
-The app uses `/opt/homebrew/bin/idevice_id` and `/opt/homebrew/bin/ideviceinfo`, so it should be run outside Codex's sandbox.
+The app uses Homebrew device tools, so it should be run outside Codex's sandbox.

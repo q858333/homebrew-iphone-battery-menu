@@ -10,6 +10,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "iPhoneBatteryMenu"
+        ),
+        .testTarget(
+            name: "iPhoneBatteryMenuTests",
+            dependencies: ["iPhoneBatteryMenu"]
         )
     ]
 )

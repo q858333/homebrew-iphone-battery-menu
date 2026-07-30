@@ -1,14 +1,59 @@
 import AppKit
 import Foundation
 
+enum DevicePlatform: String {
+    case iPhone
+    case android = "Android"
+}
+
 struct Device: Equatable {
     let udid: String
     let name: String
+    let platform: DevicePlatform
+
+    var identity: String {
+        "\(platform.rawValue):\(udid)"
+    }
+
+    var displayName: String {
+        "\(platform.rawValue) \(name)"
+    }
 }
 
 struct BatteryStatus {
     let level: Int
     let isCharging: Bool?
+}
+
+struct AndroidBatteryParser {
+    static func parse(_ dump: String) throws -> BatteryStatus {
+        var level: Int?
+        var status: Int?
+
+        for line in dump.split(whereSeparator: \.isNewline) {
+            let parts = line.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard parts.count == 2 else { continue }
+
+            switch parts[0] {
+            case "level":
+                level = Int(parts[1])
+            case "status":
+                status = Int(parts[1])
+            default:
+                break
+            }
+        }
+
+        guard let level else {
+            throw NSError(
+                domain: "iPhoneBatteryMenu.AndroidBattery",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Android battery level not found."]
+            )
+        }
+
+        return BatteryStatus(level: level, isCharging: status.map { $0 == 2 || $0 == 5 })
+    }
 }
 
 final class CommandOutputBuffer: @unchecked Sendable {
@@ -38,14 +83,20 @@ final class CommandRunner: @unchecked Sendable {
     let batteryDomain = "com.apple.mobile.battery"
 
     var hasDependencies: Bool {
-        Self.findExecutable("idevice_id") != nil && Self.findExecutable("ideviceinfo") != nil
+        Self.findExecutable("idevice_id") != nil
+            && Self.findExecutable("ideviceinfo") != nil
+            && Self.findExecutable("adb") != nil
     }
 
     private static func findExecutable(_ name: String) -> String? {
-        let paths = [
+        var paths = [
             "/opt/homebrew/bin/\(name)",
             "/usr/local/bin/\(name)"
         ]
+
+        if let home = ProcessInfo.processInfo.environment["HOME"] {
+            paths.append("\(home)/Library/Android/sdk/platform-tools/\(name)")
+        }
 
         return paths.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
@@ -58,7 +109,7 @@ final class CommandRunner: @unchecked Sendable {
         throw NSError(
             domain: "iPhoneBatteryMenu.Dependency",
             code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "\(name) is not installed. Install Homebrew libimobiledevice."]
+            userInfo: [NSLocalizedDescriptionKey: "\(name) is not installed. Install Homebrew libimobiledevice and android-platform-tools."]
         )
     }
 
@@ -73,14 +124,14 @@ final class CommandRunner: @unchecked Sendable {
             )
         }
 
-        progress("Running brew install libimobiledevice...")
-        try runWithProgress(brewPath, ["install", "libimobiledevice"], progress: progress)
+        progress("Running brew install libimobiledevice android-platform-tools...")
+        try runWithProgress(brewPath, ["install", "libimobiledevice", "android-platform-tools"], progress: progress)
 
         guard hasDependencies else {
             throw NSError(
                 domain: "iPhoneBatteryMenu.Dependency",
                 code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "libimobiledevice installed, but idevice_id or ideviceinfo was not found."]
+                userInfo: [NSLocalizedDescriptionKey: "Device tools installed, but idevice_id, ideviceinfo, or adb was not found."]
             )
         }
     }
@@ -162,6 +213,12 @@ final class CommandRunner: @unchecked Sendable {
     }
 
     func listDevices() throws -> [Device] {
+        let iPhones = (try? listIPhones()) ?? []
+        let androids = (try? listAndroidDevices()) ?? []
+        return iPhones + androids
+    }
+
+    private func listIPhones() throws -> [Device] {
         let output = try run(Self.requiredExecutable("idevice_id"), ["-l"])
         let udids = output
             .split(whereSeparator: \.isNewline)
@@ -169,25 +226,59 @@ final class CommandRunner: @unchecked Sendable {
             .filter { !$0.isEmpty }
 
         return udids.map { udid in
-            let name = deviceName(udid: udid)
-            return Device(udid: udid, name: name)
+            Device(udid: udid, name: iPhoneName(udid: udid), platform: .iPhone)
         }
     }
 
-    func batteryStatus(udid: String) throws -> BatteryStatus {
-        let levelText = try deviceValue(udid: udid, key: "BatteryCurrentCapacity")
-        let chargingText = try? deviceValue(udid: udid, key: "BatteryIsCharging")
+    private func listAndroidDevices() throws -> [Device] {
+        let output = try run(Self.requiredExecutable("adb"), ["devices"])
+        let serials = output
+            .split(whereSeparator: \.isNewline)
+            .dropFirst()
+            .compactMap { line -> String? in
+                let parts = line.split(whereSeparator: \.isWhitespace)
+                guard parts.count >= 2, parts[1] == "device" else { return nil }
+                return String(parts[0])
+            }
+
+        return serials.map { serial in
+            Device(udid: serial, name: androidName(serial: serial), platform: .android)
+        }
+    }
+
+    func batteryStatus(for device: Device) throws -> BatteryStatus {
+        switch device.platform {
+        case .iPhone:
+            return try iPhoneBatteryStatus(udid: device.udid)
+        case .android:
+            return try androidBatteryStatus(serial: device.udid)
+        }
+    }
+
+    private func iPhoneBatteryStatus(udid: String) throws -> BatteryStatus {
+        let levelText = try iPhoneValue(udid: udid, key: "BatteryCurrentCapacity")
+        let chargingText = try? iPhoneValue(udid: udid, key: "BatteryIsCharging")
         let level = Int(levelText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
         let isCharging = chargingText.map { $0 == "true" || $0 == "1" }
         return BatteryStatus(level: level, isCharging: isCharging)
     }
 
-    private func deviceValue(udid: String, key: String) throws -> String {
+    private func androidBatteryStatus(serial: String) throws -> BatteryStatus {
+        let output = try run(Self.requiredExecutable("adb"), ["-s", serial, "shell", "dumpsys", "battery"])
+        return try AndroidBatteryParser.parse(output)
+    }
+
+    private func iPhoneValue(udid: String, key: String) throws -> String {
         try run(Self.requiredExecutable("ideviceinfo"), ["-u", udid, "-q", batteryDomain, "-k", key])
     }
 
-    func deviceName(udid: String) -> String {
+    private func iPhoneName(udid: String) -> String {
         (try? run(Self.requiredExecutable("ideviceinfo"), ["-u", udid, "-k", "DeviceName"])) ?? udid
+    }
+
+    private func androidName(serial: String) -> String {
+        let model = try? run(Self.requiredExecutable("adb"), ["-s", serial, "shell", "getprop", "ro.product.model"])
+        return model?.isEmpty == false ? model! : serial
     }
 }
 
@@ -213,7 +304,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        statusItem.button?.title = "iPhone --%"
+        statusItem.button?.title = "Device --%"
         rebuildMenu(message: "Scanning...")
         refreshAfterDependencyCheck()
 
@@ -236,7 +327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func installDependencies() {
         statusItem.button?.title = "Installing"
-        rebuildMenu(message: "Installing libimobiledevice...")
+        rebuildMenu(message: "Installing device tools...")
 
         let runner = self.runner
         DispatchQueue.global(qos: .userInitiated).async {
@@ -255,7 +346,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
                 switch result {
                 case .success:
-                    self.statusItem.button?.title = "iPhone --%"
+                    self.statusItem.button?.title = "Device --%"
                     self.refreshDevices()
                     self.refreshBattery()
                 case .failure(let error):
@@ -269,12 +360,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshDevices() {
         do {
             devices = try runner.listDevices()
-            if selectedDevice == nil || !devices.contains(where: { $0.udid == selectedDevice?.udid }) {
+            if selectedDevice == nil || !devices.contains(where: { $0.identity == selectedDevice?.identity }) {
                 selectedDevice = devices.first
             }
             rebuildMenu()
         } catch {
-            statusItem.button?.title = "iPhone ?"
+            statusItem.button?.title = "Device ?"
             rebuildMenu(message: "Device scan failed: \(clean(error.localizedDescription))")
         }
     }
@@ -285,20 +376,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         guard let device = selectedDevice else {
-            statusItem.button?.title = "No iPhone"
-            rebuildMenu(message: "No device found")
+            statusItem.button?.title = "No Device"
+            rebuildMenu(message: "No iPhone or Android device found")
             return
         }
 
         do {
-            let status = try runner.batteryStatus(udid: device.udid)
+            let status = try runner.batteryStatus(for: device)
             let chargingMark = status.isCharging == true ? " ⚡" : ""
             statusItem.button?.title = "\(status.level)%\(chargingMark)"
-            rebuildMenu(message: "\(device.name): \(status.level)%\(chargingMark) · Alert: \(notifyAtLevel)%")
+            rebuildMenu(message: "\(device.displayName): \(status.level)%\(chargingMark) · Alert: \(notifyAtLevel)%")
 
             if status.level >= notifyAtLevel && lastNotificationLevel != status.level {
                 lastNotificationLevel = status.level
-                notify(title: "iPhone battery", body: "\(device.name) is at \(status.level)%")
+                notify(title: "Device battery", body: "\(device.displayName) is at \(status.level)%")
             }
         } catch {
             statusItem.button?.title = "Read failed"
@@ -322,10 +413,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(item)
         } else {
             for device in devices {
-                let item = NSMenuItem(title: "\(device.name) (\(device.udid))", action: #selector(selectDevice(_:)), keyEquivalent: "")
+                let item = NSMenuItem(title: "\(device.displayName) (\(device.udid))", action: #selector(selectDevice(_:)), keyEquivalent: "")
                 item.target = self
-                item.representedObject = device.udid
-                item.state = device.udid == selectedDevice?.udid ? .on : .off
+                item.representedObject = device.identity
+                item.state = device.identity == selectedDevice?.identity ? .on : .off
                 menu.addItem(item)
             }
         }
@@ -343,8 +434,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func selectDevice(_ sender: NSMenuItem) {
-        guard let udid = sender.representedObject as? String else { return }
-        selectedDevice = devices.first { $0.udid == udid }
+        guard let identity = sender.representedObject as? String else { return }
+        selectedDevice = devices.first { $0.identity == identity }
         lastNotificationLevel = nil
         refreshBattery()
     }
