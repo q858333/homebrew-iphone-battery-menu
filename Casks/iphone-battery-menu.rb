@@ -1,6 +1,6 @@
 cask "iphone-battery-menu" do
-  version "1.0.0"
-  sha256 "d186cfb7de415427fa9d5b311c3772b004c3749bdd5144df6d7702b05cccf517"
+  version "1.0.1"
+  sha256 "19c20ffb1545e73e7616d7c715d04c4475a88747a8bf2d756f3ff440923c1b1d"
 
   url "https://github.com/q858333/iPhoneBatteryMenu/releases/download/v#{version}/iPhoneBatteryMenu.zip",
       verified: "github.com/q858333/iPhoneBatteryMenu/"
