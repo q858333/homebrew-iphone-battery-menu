@@ -1,4 +1,4 @@
-# iPhoneBatteryMenu
+# ChargePeek
 
 A tiny macOS menu bar utility that reads iPhone and Android battery levels from the menu bar.
 
@@ -39,7 +39,7 @@ Use **Set Alert Level...** from the menu bar item to enter a percentage from 1 t
 
 ```bash
 ./build-app.sh
-open .build/release/iPhoneBatteryMenu.app
+open .build/release/ChargePeek.app
 ```
 
 The app uses Homebrew device tools, so it should be run outside Codex's sandbox.

@@ -304,7 +304,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        statusItem.button?.title = "Device --%"
+        statusItem.button?.title = "ChargePeek --%"
         rebuildMenu(message: "Scanning...")
         refreshAfterDependencyCheck()
 
@@ -346,7 +346,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
                 switch result {
                 case .success:
-                    self.statusItem.button?.title = "Device --%"
+                    self.statusItem.button?.title = "ChargePeek --%"
                     self.refreshDevices()
                     self.refreshBattery()
                 case .failure(let error):
@@ -389,7 +389,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             if status.level >= notifyAtLevel && lastNotificationLevel != status.level {
                 lastNotificationLevel = status.level
-                notify(title: "Device battery", body: "\(device.displayName) is at \(status.level)%")
+                notify(title: "ChargePeek", body: "\(device.displayName) is at \(status.level)%")
             }
         } catch {
             statusItem.button?.title = "Read failed"
@@ -488,7 +488,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
-struct iPhoneBatteryMenuApp {
+struct ChargePeekApp {
     @MainActor
     static func main() {
         let app = NSApplication.shared

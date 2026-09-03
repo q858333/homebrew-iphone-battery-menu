@@ -1,3 +1,7 @@
+# ChargePeek
+
+菜单栏查看 iPhone 和 Android 设备电量。
+
 # 安装
 
 一条命令安装：
@@ -20,4 +24,4 @@ brew install --cask iphone-battery-menu
 
 # 打包
 ./build-app.sh
-open .build/release/iPhoneBatteryMenu.app
+open .build/release/ChargePeek.app

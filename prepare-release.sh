@@ -29,7 +29,7 @@ ROOT_DIR="$(git rev-parse --show-toplevel)"
 APP_DIR="$ROOT_DIR/iPhoneBatteryMenu"
 ZIP_FILE="$APP_DIR/iPhoneBatteryMenu.zip"
 BRANCH="$(git branch --show-current)"
-DEFAULT_TAP_REPO="$(dirname "$(dirname "$ROOT_DIR")")/homebrew-iphone-battery-menu"
+DEFAULT_TAP_REPO="$ROOT_DIR"
 TAP_REPO="${TAP_REPO:-$DEFAULT_TAP_REPO}"
 TAP_CASK_FILE="$TAP_REPO/Casks/iphone-battery-menu.rb"
 TAP_BRANCH=""
@@ -86,11 +86,11 @@ if [[ ! -f "$TAP_CASK_FILE" ]]; then
     exit 1
 fi
 
-echo "Building iPhoneBatteryMenu.app..."
+echo "Building ChargePeek.app..."
 "$APP_DIR/build-app.sh" >/dev/null
 
 echo "Creating release zip..."
-ditto -c -k --keepParent "$APP_DIR/.build/release/iPhoneBatteryMenu.app" "$ZIP_FILE"
+ditto -c -k --keepParent "$APP_DIR/.build/release/ChargePeek.app" "$ZIP_FILE"
 
 SHA256="$(shasum -a 256 "$ZIP_FILE" | awk '{print $1}')"
 
@@ -101,7 +101,7 @@ VERSION="$VERSION" SHA256="$SHA256" ruby -0pi -e '
 ' "$TAP_CASK_FILE"
 
 git -C "$TAP_REPO" add Casks/iphone-battery-menu.rb
-git -C "$TAP_REPO" commit -m "Update iPhoneBatteryMenu to $VERSION"
+git -C "$TAP_REPO" commit -m "Update ChargePeek to $VERSION"
 
 git tag "$TAG"
 git push origin "$BRANCH"
@@ -126,7 +126,7 @@ Updated tap repository:
   $TAP_REPO
 
 Upload the zip to:
-  https://github.com/q858333/iPhoneBatteryMenu/releases/tag/$TAG
+  https://github.com/q858333/homebrew-iphone-battery-menu/releases/tag/$TAG
 
 Then test:
   brew update
